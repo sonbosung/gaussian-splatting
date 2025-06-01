@@ -1,9 +1,9 @@
-diskpath=/mnt/disk2
-exp_path=${diskpath}/auggs/experiments
+diskpath=/home/cvnar
+exp_path=${diskpath}/gaussian-splatting/experiments
 colmap_path=${diskpath}/360
 colmap_path_augmented=${diskpath}/360_augmented
 # for scene in bicycle flowers garden stump treehill
-for scene in flowers garden stump treehill
+for scene in bicycle flowers garden stump treehill
 do
     
     python train_scheduler.py -s ${colmap_path_augmented}/${scene} -m ${exp_path}/360_augmented_scheduler/${scene} \

@@ -149,8 +149,10 @@ class GroupScheduler:
         
 class ImageClustering:
     def __init__(self,
-                 dataset_path,):
+                 dataset_path,
+		 n_clusters = None):
         self.dataset_path = dataset_path
+        self.n_clusters = n_clusters
         self.images, self.points3D, self.cameras = get_colmap_data(self.dataset_path)
         self.split_train_test()
         self.create_affinity_matrix()
@@ -183,17 +185,18 @@ class ImageClustering:
         self.eigenvalues, self.eigenvectors = np.linalg.eigh(L_sym)
 
     def select_n_clusters(self):
-        self.score = []
-        for i in range(2, 50):
-            n_clusters = i
-            U = self.eigenvectors[:, :n_clusters]
-            U_norm = normalize(U, norm='l2')
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-            clusters = kmeans.fit_predict(U_norm)
-            sscore = silhouette_score(U_norm, clusters)
-            self.score.append(sscore)
-            print(f"{i} clusters, silhouette score: {sscore}")
-        self.n_clusters = int(input("select number of clusters: "))
+        if not self.n_clusters:
+            self.score = []
+            for i in range(2, 50):
+                n_clusters = i
+                U = self.eigenvectors[:, :n_clusters]
+                U_norm = normalize(U, norm='l2')
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+                clusters = kmeans.fit_predict(U_norm)
+                sscore = silhouette_score(U_norm, clusters)
+                self.score.append(sscore)
+                print(f"{i} clusters, silhouette score: {sscore}")
+            self.n_clusters = int(input("select number of clusters: "))
         U = self.eigenvectors[:, :self.n_clusters]
         U_norm = normalize(U, norm='l2')
         kmeans = KMeans(n_clusters=self.n_clusters, random_state=42)

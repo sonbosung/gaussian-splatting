@@ -87,7 +87,7 @@ def training(dataset,
     name_to_uid = {cam.image_name: cam.uid for cam in scene.getTrainCameras()}
     cameras = scene.getTrainCameras().copy()
     if bundle_training:
-        clustering = ImageClustering(dataset.source_path+"/sparse/0")
+        clustering = ImageClustering(dataset.source_path+"/sparse/0",n_clusters=5)
         scheduler = GroupScheduler(cameras, clustering.ordered_cluster_names,
                                    densify_until_iter = opt.densify_until_iter,
                                    densify_from_iter = opt.densify_from_iter,
