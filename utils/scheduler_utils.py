@@ -94,7 +94,7 @@ class GroupScheduler:
                 self.uid_stack = list(self.name_to_uid.values())
             rand_idx = randint(0, len(self.uid_stack) - 1)
             vind = self.uid_stack.pop(rand_idx)
-            print(f"Iteration: {iteration}, Warmup stage: {vind}")
+            # print(f"Iteration: {iteration}, Warmup stage: {vind}")
             return vind
         elif iteration > self.densify_from_iter and iteration <= self.densify_until_iter:
             if iteration <= self.densify_from_iter + len(self.ordered_uids)*5:
@@ -111,7 +111,7 @@ class GroupScheduler:
                 if iteration == self.densify_from_iter + len(self.ordered_uids)*5:
                     self.reset_opacity_flag = True
                 vind = self.uid_sequence[(iteration - self.densify_from_iter-1) % len(self.uid_sequence)]
-                print(f"Iteration: {iteration}, Sequential stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
+                # print(f"Iteration: {iteration}, Sequential stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
                 return vind
             elif iteration > self.densify_from_iter + len(self.ordered_uids)*5 \
                 and iteration <= self.densify_from_iter + len(self.ordered_uids)*25:
@@ -126,7 +126,7 @@ class GroupScheduler:
                     self.reset_opacity_flag = True
                 rand_idx = randint(0, len(self.random_group_uid_stack) - 1)
                 vind = self.random_group_uid_stack.pop(rand_idx)
-                print(f"Iteration: {iteration}, Grouped Random stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
+                # print(f"Iteration: {iteration}, Grouped Random stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
                 return vind
             else:
                 if not self.uid_stack:
@@ -137,14 +137,14 @@ class GroupScheduler:
                     self.reset_opacity_flag = True
                 rand_idx = randint(0, len(self.uid_stack) - 1)
                 vind = self.uid_stack.pop(rand_idx)
-                print(f"Iteration: {iteration}, Random densification stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
+                # print(f"Iteration: {iteration}, Random densification stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
                 return vind
         else:
             if not self.uid_stack:
                 self.uid_stack = list(self.name_to_uid.values())
             rand_idx = randint(0, len(self.uid_stack) - 1)
             vind = self.uid_stack.pop(rand_idx)
-            print(f"Iteration: {iteration}, Random stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
+            # print(f"Iteration: {iteration}, Random stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
             return vind
         
 class ImageClustering:
@@ -260,14 +260,14 @@ class ImageClustering:
             current_cluster = next_cluster
 
         self.ordered_cluster_ids = [self.cluster_ids[i] for i in self.ordered_cluster_ids]
-        print("Ordered cluster ids: ", self.ordered_cluster_ids)
+        # print("Ordered cluster ids: ", self.ordered_cluster_ids)
         self.ordered_clusters = [self.intra_cluster_ordering[i] for i in self.ordered_cluster_ids]
-        print("Ordered clusters: ", self.ordered_clusters)
+        # print("Ordered clusters: ", self.ordered_clusters)
         self.ordered_colmap_ids = {}
         for i, cluster in enumerate(self.ordered_clusters):
             self.ordered_colmap_ids[i] = [self.idx_to_id[idx] for idx in cluster]
-        print("Ordered colmap ids: ", self.ordered_colmap_ids)        
+        # print("Ordered colmap ids: ", self.ordered_colmap_ids)        
         self.ordered_cluster_names = {}
         for i in range(self.n_clusters):
             self.ordered_cluster_names[i] = [self.images[id].name for id in self.ordered_colmap_ids[i]]
-        print("Ordered cluster names: ", self.ordered_cluster_names)
+        # print("Ordered cluster names: ", self.ordered_cluster_names)
