@@ -56,6 +56,7 @@ def training(dataset,
              enable_ds_lap,
              lambda_ds,
              lambda_lap,
+             n_clusters,
              ):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -87,7 +88,7 @@ def training(dataset,
     name_to_uid = {cam.image_name: cam.uid for cam in scene.getTrainCameras()}
     cameras = scene.getTrainCameras().copy()
     if bundle_training:
-        clustering = ImageClustering(dataset.source_path+"/sparse/0",n_clusters=5)
+        clustering = ImageClustering(dataset.source_path+"/sparse/0",n_clusters=n_clusters)
         scheduler = GroupScheduler(cameras, clustering.ordered_cluster_names,
                                    densify_until_iter = opt.densify_until_iter,
                                    densify_from_iter = opt.densify_from_iter,
@@ -348,6 +349,7 @@ if __name__ == "__main__":
     parser.add_argument("--enable_ds_lap", action='store_true', default=False)
     parser.add_argument("--lambda_ds", type=float, default=0.0)
     parser.add_argument("--lambda_lap", type=float, default=0.0)
+    parser.add_argument("--n_clusters", type=int, default=5)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -372,7 +374,8 @@ if __name__ == "__main__":
              args.bundle_training,
              args.enable_ds_lap,
              args.lambda_ds,
-             args.lambda_lap)
+             args.lambda_lap,
+             args.n_clusters)
     # 학습에 사용된 인자들을 로그 파일에 기록
     log_file = os.path.join(args.model_path, "training_args.log")
     with open(log_file, "w") as f:

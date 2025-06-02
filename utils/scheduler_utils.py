@@ -121,8 +121,8 @@ class GroupScheduler:
                     self.random_group_uid_stack = self.group_uids.copy()
                 if len(self.random_group_uid_stack) == 1:
                     self.densify_and_prune_flag = True
-                    self.group_idx = randint(0, len(self.ordered_uids) - 1)
-                if iteration == self.densify_from_itr + len(self.ordered_uids)*40:
+                    self.group_idx = randint(0, self.n_groups - 1)
+                if iteration == self.densify_from_iter + len(self.ordered_uids)*40:
                     self.reset_opacity_flag = True
                 rand_idx = randint(0, len(self.random_group_uid_stack) - 1)
                 vind = self.random_group_uid_stack.pop(rand_idx)
