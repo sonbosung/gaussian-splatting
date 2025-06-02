@@ -147,6 +147,101 @@ class GroupScheduler:
             # print(f"Iteration: {iteration}, Random stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
             return vind
         
+class PartialGroupScheduler:
+    def __init__(self, 
+                 cameras,
+                 grouped_names: dict, 
+                 densify_until_iter: int, 
+                 densify_from_iter: int, 
+                 debug: bool=False,
+                 ):
+        self.debug = debug
+        if self.debug and not grouped_names:
+            self.grouped_names = {0: [i for i in range(42)], 1: [i for i in range(42, 86)], 2: [i for i in range(86, 120)],
+                                  3: [i for i in range(120, 150)], 4: [i for i in range(150, 200)]}
+        else:
+            self.grouped_names = grouped_names
+        self.n_groups = len(self.grouped_names)
+        self.densify_until_iter = densify_until_iter
+        self.densify_from_iter = densify_from_iter
+        self.generate_dict_name_to_uid(cameras)
+        self.generate_ordered_uids()
+        self.uid_stack = None
+        self.sequential_count = 0
+        self.group_idx = 0
+        self.densify_and_prune_flag = False
+        self.reset_opacity_flag = False
+        self.random_group_uid_stack = None
+
+    def generate_dict_name_to_uid(self, cameras):
+        """
+        Generate a dictionary that maps the image name to the uid.
+        """
+        if self.debug:
+            self.name_to_uid = {}
+            for group_name_list in self.grouped_names.values():
+                for name in group_name_list:
+                    self.name_to_uid[name] = len(self.name_to_uid)
+        else:   
+            self.name_to_uid = {cam.image_name: cam.uid for cam in cameras}
+
+    def generate_ordered_uids(self):
+        """
+        Generate a list of uids that are ordered by the group indices.
+        """
+        ordered_uids = []
+        for group_index in self.grouped_names.keys():
+            ordered_uids.extend(self.name_to_uid[name] for name in self.grouped_names[group_index])
+        print(ordered_uids)
+        self.ordered_uids = ordered_uids
+
+    def scheduled_training_index(self, iteration: int,):
+        """
+        For given iteration, return the uid of the camera to be accessed.
+        Also, the scheduler will trigger a densify_and_prune or reset_opacity at the appropriate steps.
+        The iteration range starts from 1 to the maximum iterations(30000).
+        """
+        if iteration % 3000 == 0:
+            self.reset_opacity_flag = True
+        if iteration <= self.densify_from_iter or iteration > self.densify_until_iter:
+            # Warmup stage
+            if not self.uid_stack:
+                self.uid_stack = list(self.name_to_uid.values())
+            rand_idx = randint(0, len(self.uid_stack) - 1)
+            vind = self.uid_stack.pop(rand_idx)
+            return vind
+        else:
+            # Densification stage
+            iteration_in_stage = iteration - self.densify_from_iter
+            stage = iteration_in_stage // 100
+            step_in_stage = iteration_in_stage % 100
+
+            # 매 100번째 iteration마다 densification 수행
+            if step_in_stage == 0:
+                self.densify_and_prune_flag = True
+            
+            # 매 100번째 iteration의 다음 iteration에서 그룹 변경
+            if step_in_stage == 1:
+                self.group_idx = stage % self.n_groups
+                self.group_names = self.grouped_names[self.group_idx]
+                self.group_uids = [self.name_to_uid[name] for name in self.group_names]
+                self.random_group_uid_stack = None
+
+            # 앞 80회는 warmup과 동일
+            if step_in_stage < 80:
+                if not self.uid_stack:
+                    self.uid_stack = list(self.name_to_uid.values())
+                rand_idx = randint(0, len(self.uid_stack) - 1)
+                vind = self.uid_stack.pop(rand_idx)
+                return vind
+            # 뒤 20회는 현재 그룹 내에서 비복원추출
+            else:
+                if not self.random_group_uid_stack or len(self.random_group_uid_stack) == 0:
+                    self.random_group_uid_stack = self.group_uids.copy()
+                rand_idx = randint(0, len(self.random_group_uid_stack) - 1)
+                vind = self.random_group_uid_stack.pop(rand_idx)
+                return vind
+
 class ImageClustering:
     def __init__(self,
                  dataset_path,
