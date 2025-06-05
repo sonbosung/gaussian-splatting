@@ -251,26 +251,26 @@ def training(dataset,
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-            if iteration == opt.iterations:
-                if bundle_training:
-                    scene_name = dataset.source_path.split("/")[-1]
-                    iterations = np.arange(1, iterations + 1)
-                    plt.figure(figsize=(30, 10))
-                    plt.subplot(2, 1, 1)
-                    plt.vlines(iterations[densification_triggers == 1], 0, 1, color='blue', label='Densify and Prune')
-                    plt.axvline(x=opt.densify_from_iter, color='r', linestyle='--', label='Densify Start')
-                    plt.axvline(x=opt.densify_until_iter, color='r', linestyle='--', label='Densify End')
-                    plt.title('Densification Triggers')
-                    plt.xlabel('Iteration')
-                    plt.subplot(2, 1, 2)
-                    plt.vlines(iterations[reset_opacity_triggers == 1], 0, 1, color='green', label='Reset Opacity')
-                    plt.axvline(x=opt.densify_from_iter, color='r', linestyle='--', label='Densify Start')
-                    plt.axvline(x=opt.densify_until_iter, color='r', linestyle='--', label='Densify End')
-                    plt.title('Reset Opacity Triggers')
-                    plt.xlabel('Iteration')
-                    plt.tight_layout()
-                    os.makedirs(f"vis/{scene_name}", exist_ok=True)
-                    plt.savefig(f"vis/{scene_name}/{n_clusters}clusters_{n_turns}turns_camera_order_visualization.png")
+            # if iteration == opt.iterations:
+            #     if bundle_training:
+            #         scene_name = dataset.source_path.split("/")[-1]
+            #         iterations = np.arange(1, iterations + 1)
+            #         plt.figure(figsize=(30, 10))
+            #         plt.subplot(2, 1, 1)
+            #         plt.vlines(iterations[densification_triggers == 1], 0, 1, color='blue', label='Densify and Prune')
+            #         plt.axvline(x=opt.densify_from_iter, color='r', linestyle='--', label='Densify Start')
+            #         plt.axvline(x=opt.densify_until_iter, color='r', linestyle='--', label='Densify End')
+            #         plt.title('Densification Triggers')
+            #         plt.xlabel('Iteration')
+            #         plt.subplot(2, 1, 2)
+            #         plt.vlines(iterations[reset_opacity_triggers == 1], 0, 1, color='green', label='Reset Opacity')
+            #         plt.axvline(x=opt.densify_from_iter, color='r', linestyle='--', label='Densify Start')
+            #         plt.axvline(x=opt.densify_until_iter, color='r', linestyle='--', label='Densify End')
+            #         plt.title('Reset Opacity Triggers')
+            #         plt.xlabel('Iteration')
+            #         plt.tight_layout()
+            #         os.makedirs(f"vis/{scene_name}", exist_ok=True)
+            #         plt.savefig(f"vis/{scene_name}/{n_clusters}clusters_{n_turns}turns_camera_order_visualization.png")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

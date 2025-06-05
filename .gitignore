@@ -10,3 +10,5 @@ screenshots
 *.csv
 *.png
 experiments
+.gitsecret/keys/random_seed
+!*.secret

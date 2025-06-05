@@ -1,7 +1,7 @@
 #!/bin/bash
 # 실험 설정
-n_clusters=5
-n_turns=30
+n_clusters=4
+n_turns=20
 # 환경 변수 설정
 diskpath="/mnt/disk2"
 exp_path="${diskpath}/auggs/experiments"
@@ -16,7 +16,7 @@ for scene in $(ls "$colmap_path"); do
     else
         images_folder="images_2"
     fi
-    python train_scheduler.py -s ${colmap_path_augmented}/${scene} -m ${exp_path}/${exp_name}/${scene} -n ${n_clusters} -t ${n_turns} \
+    python train_scheduler.py -s ${colmap_path_augmented}/${scene} -m ${exp_path}/${exp_name}/${scene} \
     -i ${images_folder} \
     --eval \
     --bundle_training \
@@ -28,4 +28,5 @@ for scene in $(ls "$colmap_path"); do
     --n_turns ${n_turns}
     python render.py -m ${exp_path}/${exp_name}/${scene} --skip_train
     python metrics.py -m ${exp_path}/${exp_name}/${scene}
+    python experiment_utils.py ${scene} ${exp_name}
 done
