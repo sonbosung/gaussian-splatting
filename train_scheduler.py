@@ -378,6 +378,7 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_ds", type=float, default=0.0)
     parser.add_argument("--lambda_lap", type=float, default=0.0)
     parser.add_argument("--n_clusters", type=int, default=5)
+    parser.add_argument("--n_turns", type=int, default=30)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
