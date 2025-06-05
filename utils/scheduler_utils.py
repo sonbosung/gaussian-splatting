@@ -59,6 +59,10 @@ class GroupScheduler:
         self.densify_and_prune_flag = False
         self.reset_opacity_flag = False
         self.random_group_uid_stack = None
+        self.num_turns = 20
+
+    def set_num_turns(self, num_turns: int):
+        self.num_turns = num_turns
 
     def generate_dict_name_to_uid(self, cameras):
         """
@@ -97,7 +101,7 @@ class GroupScheduler:
             # print(f"Iteration: {iteration}, Warmup stage: {vind}")
             return vind
         elif iteration > self.densify_from_iter and iteration <= self.densify_until_iter:
-            if iteration <= self.densify_from_iter + len(self.ordered_uids)*20:
+            if iteration <= self.densify_from_iter + len(self.ordered_uids)*self.num_turns:
                 if (iteration - self.densify_from_iter) % len(self.ordered_uids) == 1:
                     interval = ((iteration - self.densify_from_iter)//len(self.ordered_uids))*(len(self.ordered_uids)//5)
                     first_part = self.ordered_uids.copy()[interval:]
@@ -108,21 +112,22 @@ class GroupScheduler:
                     self.sequential_count += 1
                 if (iteration - self.densify_from_iter) % len(self.ordered_uids) == 0:
                     self.densify_and_prune_flag = True
-                if iteration == self.densify_from_iter + len(self.ordered_uids)*20:
+                if iteration == self.densify_from_iter + len(self.ordered_uids)*self.num_turns:
                     self.reset_opacity_flag = True
                 vind = self.uid_sequence[(iteration - self.densify_from_iter-1) % len(self.uid_sequence)]
                 # print(f"Iteration: {iteration}, Sequential stage: {vind}, densification_flag = {self.densify_and_prune_flag}, reset_opacity_flag = {self.reset_opacity_flag}")
                 return vind
-            elif iteration > self.densify_from_iter + len(self.ordered_uids)*20 \
-                and iteration <= self.densify_from_iter + len(self.ordered_uids)*40:
+            elif iteration > self.densify_from_iter + len(self.ordered_uids)*self.num_turns \
+                and iteration <= self.densify_from_iter + len(self.ordered_uids)*2*self.num_turns:
                 if not self.random_group_uid_stack:
                     self.group_names = self.grouped_names[self.group_idx]
                     self.group_uids = [self.name_to_uid[name] for name in self.group_names]
                     self.random_group_uid_stack = self.group_uids.copy()
                 if len(self.random_group_uid_stack) == 1:
-                    self.densify_and_prune_flag = True
                     self.group_idx = randint(0, self.n_groups - 1)
-                if iteration == self.densify_from_iter + len(self.ordered_uids)*40:
+                if (iteration - self.densify_from_iter - len(self.ordered_uids)*self.num_turns) % len(self.ordered_uids) == 0:
+                    self.densify_and_prune_flag = True
+                if iteration == self.densify_from_iter + len(self.ordered_uids)*2*self.num_turns:
                     self.reset_opacity_flag = True
                 rand_idx = randint(0, len(self.random_group_uid_stack) - 1)
                 vind = self.random_group_uid_stack.pop(rand_idx)
@@ -131,9 +136,9 @@ class GroupScheduler:
             else:
                 if not self.uid_stack:
                     self.uid_stack = list(self.name_to_uid.values())
-                if (iteration - self.densify_from_iter - len(self.ordered_uids)*40) % 100 == 0:
+                if (iteration - self.densify_from_iter - len(self.ordered_uids)*2*self.num_turns) % 100 == 0:
                     self.densify_and_prune_flag = True
-                if (iteration - self.densify_from_iter - len(self.ordered_uids)*40) % 3000 == 0:
+                if (iteration - self.densify_from_iter - len(self.ordered_uids)*2*self.num_turns) % 3000 == 0:
                     self.reset_opacity_flag = True
                 rand_idx = randint(0, len(self.uid_stack) - 1)
                 vind = self.uid_stack.pop(rand_idx)

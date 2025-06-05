@@ -57,6 +57,7 @@ def training(dataset,
              lambda_ds,
              lambda_lap,
              n_clusters,
+             n_turns,
              ):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -93,6 +94,9 @@ def training(dataset,
                                    densify_until_iter = opt.densify_until_iter,
                                    densify_from_iter = opt.densify_from_iter,
                                    debug = False)
+        densification_triggers = np.zeros(opt.iterations)
+        reset_opacity_triggers = np.zeros(opt.iterations)
+        scheduler.set_num_turns(n_turns)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -223,10 +227,14 @@ def training(dataset,
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                     scheduler.densify_and_prune_flag = False
+                    if bundle_training:
+                        densification_triggers[iteration-1] = 1
                 
                 if scheduler.reset_opacity_flag:
                     gaussians.reset_opacity()
                     scheduler.reset_opacity_flag = False
+                    if bundle_training:
+                        reset_opacity_triggers[iteration-1] = 1
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -243,6 +251,26 @@ def training(dataset,
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            if iteration == opt.iterations:
+                if bundle_training:
+                    scene_name = dataset.source_path.split("/")[-1]
+                    iterations = np.arange(1, iterations + 1)
+                    plt.figure(figsize=(30, 10))
+                    plt.subplot(2, 1, 1)
+                    plt.vlines(iterations[densification_triggers == 1], 0, 1, color='blue', label='Densify and Prune')
+                    plt.axvline(x=opt.densify_from_iter, color='r', linestyle='--', label='Densify Start')
+                    plt.axvline(x=opt.densify_until_iter, color='r', linestyle='--', label='Densify End')
+                    plt.title('Densification Triggers')
+                    plt.xlabel('Iteration')
+                    plt.subplot(2, 1, 2)
+                    plt.vlines(iterations[reset_opacity_triggers == 1], 0, 1, color='green', label='Reset Opacity')
+                    plt.axvline(x=opt.densify_from_iter, color='r', linestyle='--', label='Densify Start')
+                    plt.axvline(x=opt.densify_until_iter, color='r', linestyle='--', label='Densify End')
+                    plt.title('Reset Opacity Triggers')
+                    plt.xlabel('Iteration')
+                    plt.tight_layout()
+                    os.makedirs(f"vis/{scene_name}", exist_ok=True)
+                    plt.savefig(f"vis/{scene_name}/{n_clusters}clusters_{n_turns}turns_camera_order_visualization.png")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -375,7 +403,8 @@ if __name__ == "__main__":
              args.enable_ds_lap,
              args.lambda_ds,
              args.lambda_lap,
-             args.n_clusters)
+             args.n_clusters,
+             args.n_turns)
     # 학습에 사용된 인자들을 로그 파일에 기록
     log_file = os.path.join(args.model_path, "training_args.log")
     with open(log_file, "w") as f:

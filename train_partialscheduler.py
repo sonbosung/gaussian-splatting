@@ -24,6 +24,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from utils.scheduler_utils import ImageClustering, PartialGroupScheduler
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -42,7 +43,21 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, 
+             opt, 
+             pipe, 
+             testing_iterations, 
+             saving_iterations, 
+             checkpoint_iterations, 
+             checkpoint, 
+             debug_from,
+             camera_order,
+             bundle_training,
+             enable_ds_lap,
+             lambda_ds,
+             lambda_lap,
+             n_clusters,
+             ):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -70,6 +85,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
+    name_to_uid = {cam.image_name: cam.uid for cam in scene.getTrainCameras()}
+    cameras = scene.getTrainCameras().copy()
+    if bundle_training:
+        clustering = ImageClustering(dataset.source_path+"/sparse/0",n_clusters=n_clusters)
+        scheduler = PartialGroupScheduler(cameras, clustering.ordered_cluster_names,
+                                   densify_until_iter = opt.densify_until_iter,
+                                   densify_from_iter = opt.densify_from_iter,
+                                   debug = False)
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -96,13 +120,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
+        if bundle_training:
+            vind = scheduler.scheduled_training_index(iteration)
+            viewpoint_cam = cameras[vind]
+        else:
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+                viewpoint_indices = list(range(len(viewpoint_stack)))
+            rand_idx = randint(0, len(viewpoint_indices) - 1)
+            viewpoint_cam = viewpoint_stack.pop(rand_idx)
+            vind = viewpoint_indices.pop(rand_idx)
 
         # Render
         if (iteration - 1) == debug_from:
@@ -125,7 +152,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        if enable_ds_lap:
+            ds_loss = InvDepthSmoothnessLoss()(render_pkg["depth"], image)
+            lap_loss = laplacian_pyramid_loss(image.unsqueeze(0), gt_image.unsqueeze(0))
+        else:
+            ds_loss = 0.0
+            lap_loss = 0.0
+
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value) + lambda_ds * ds_loss + lambda_lap * lap_loss
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -157,7 +191,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            training_report(tb_writer, 
+                            iteration, 
+                            Ll1, 
+                            loss, 
+                            l1_loss, 
+                            iter_start.elapsed_time(iter_end), 
+                            testing_iterations, 
+                            scene, 
+                            render, 
+                            (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), 
+                            dataset.train_test_exp,
+                            1.0 - ssim_value,
+                            ds_loss,
+                            lap_loss,
+                            lambda_ds,
+                            lambda_lap,
+                            enable_ds_lap)
+
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -168,12 +219,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                if scheduler.densify_and_prune_flag:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                    scheduler.densify_and_prune_flag = False
                 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                if scheduler.reset_opacity_flag:
                     gaussians.reset_opacity()
+                    scheduler.reset_opacity_flag = False
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -213,11 +266,33 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+def training_report(tb_writer, 
+                    iteration, 
+                    Ll1, 
+                    loss, 
+                    l1_loss, 
+                    elapsed, 
+                    testing_iterations, 
+                    scene : Scene, 
+                    renderFunc, 
+                    renderArgs, 
+                    train_test_exp,
+                    ssim_loss,
+                    ds_loss,
+                    lap_loss,
+                    lambda_ds,  
+                    lambda_lap,
+                    enable_ds_lap):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
+        tb_writer.add_scalar('train_loss_patches/ssim_loss', ssim_loss.item(), iteration)
+        if enable_ds_lap:
+            tb_writer.add_scalar('train_loss_patches/ds_loss', ds_loss.item(), iteration)
+            tb_writer.add_scalar('train_loss_patches/lap_loss', lap_loss.item(), iteration)
+            tb_writer.add_scalar('train_loss_patches/lambda_ds', lambda_ds, iteration)
+            tb_writer.add_scalar('train_loss_patches/lambda_lap', lambda_lap, iteration)
+            tb_writer.add_scalar('iter_time', elapsed, iteration)
 
     # Report test and samples of training set
     if iteration in testing_iterations:
@@ -269,6 +344,12 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--bundle_training", action='store_true', default=False)
+    parser.add_argument("--camera_order", type=str, default='covisibility')
+    parser.add_argument("--enable_ds_lap", action='store_true', default=False)
+    parser.add_argument("--lambda_ds", type=float, default=0.0)
+    parser.add_argument("--lambda_lap", type=float, default=0.0)
+    parser.add_argument("--n_clusters", type=int, default=5)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -281,7 +362,26 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
-
+    training(lp.extract(args), 
+             op.extract(args), 
+             pp.extract(args), 
+             args.test_iterations, 
+             args.save_iterations, 
+             args.checkpoint_iterations, 
+             args.start_checkpoint, 
+             args.debug_from,
+             args.camera_order,
+             args.bundle_training,
+             args.enable_ds_lap,
+             args.lambda_ds,
+             args.lambda_lap,
+             args.n_clusters)
+    # 학습에 사용된 인자들을 로그 파일에 기록
+    log_file = os.path.join(args.model_path, "training_args.log")
+    with open(log_file, "w") as f:
+        f.write("Training Arguments:\n")
+        f.write("-" * 50 + "\n")
+        for arg, value in vars(args).items():
+            f.write(f"{arg}: {value}\n")
     # All done
     print("\nTraining complete.")
