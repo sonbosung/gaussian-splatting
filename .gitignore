@@ -12,3 +12,4 @@ screenshots
 experiments
 .gitsecret/keys/random_seed
 !*.secret
+*.sh
