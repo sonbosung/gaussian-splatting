@@ -6,7 +6,7 @@ n_clusters=4
 diskpath="/home/cvnar"
 exp_path="${diskpath}/gaussian-splatting/experiments"
 # exp_name="360_scheduler_cluster${n_clusters}_turn${n_turns}"
-exp_name="360_scheduler_cluster${n_clusters}"
+exp_name="360_partialscheduler_cluster${n_clusters}"
 colmap_path="${diskpath}/360"
 colmap_path_augmented="${diskpath}/360_augmented"
 
