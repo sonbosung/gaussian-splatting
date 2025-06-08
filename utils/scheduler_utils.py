@@ -5,8 +5,8 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import normalize
 import sys, os
 sys.path.append("/mnt/disk2/auggs/gaussian-splatting")
-from utils.bundle_utils import *
-from utils.colmap_utils import *
+from utils.bundle_utils import build_covisibility_matrix
+from utils.colmap_utils import get_colmap_data
 import matplotlib.pyplot as plt
 from sklearn.metrics import silhouette_score
 
@@ -250,9 +250,11 @@ class PartialGroupScheduler:
 class ImageClustering:
     def __init__(self,
                  dataset_path,
-		 n_clusters = None):
+		 n_clusters = None,
+         inv_affinity_matrix = False):
         self.dataset_path = dataset_path
         self.n_clusters = n_clusters
+        self.inv_affinity_matrix = inv_affinity_matrix
         self.images, self.points3D, self.cameras = get_colmap_data(self.dataset_path)
         self.split_train_test()
         self.create_affinity_matrix()
@@ -274,10 +276,13 @@ class ImageClustering:
         self.train_images = {k: v for k, v in self.images.items() if v.id in self.train_ids}
     
     def create_affinity_matrix(self):
+        from utils.bundle_utils import build_covisibility_matrix  # 함수 내부에서 import
         self.affinity_matrix, self.id_to_idx, self.idx_to_id = build_covisibility_matrix(self.train_images, self.points3D)
     
     def cluster_images(self):
         W = np.array(self.affinity_matrix)
+        if self.inv_affinity_matrix:
+            W = 1 / (W+1)
         self.W = (W - W.min()) / (W.max() - W.min())
         D = np.diag(self.W.sum(axis=1))
         D_inv_sqrt = np.diag(1.0 / np.sqrt(np.maximum(self.W.sum(axis=1), 1e-10)))

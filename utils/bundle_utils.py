@@ -79,7 +79,7 @@ def create_sequence_from_covisibility_graph(covisibility_graph, min_covisibility
 
     return sequence
 
-def cluster_cameras(colmap_path, camera_order, output_type="index"):
+def cluster_cameras(colmap_path, camera_order, n_clusters=10, output_type="index"):
     colmap_images, colmap_points3D, colmap_cameras = get_colmap_data(colmap_path)
     print(camera_order)
     if camera_order == 'covisibility':
@@ -101,17 +101,25 @@ def cluster_cameras(colmap_path, camera_order, output_type="index"):
                 train_id.append(id)
                 train_only_idx.append(count)
                 count+=1
-       
         rotations_image, translations_image = compute_extrinsics(colmap_images)
 
-        train_only_visibility_idx = []
+        train_only_visibility_ids = []
         for id in covisibility_sequence:
             if id in train_id:
-                train_only_visibility_idx.append(id)
-        train_only_visibility_idx = np.array(train_only_visibility_idx)
-        sorted_keys = train_only_visibility_idx  # sorted_indices 대신 sorted_keys로 할당
+                train_only_visibility_ids.append(id)
+        train_only_visibility_ids = np.array(train_only_visibility_ids)
+        sorted_keys = train_only_visibility_ids  # sorted_indices 대신 sorted_keys로 할당
         ordered_image_names = [image_id_name_dict[key] for key in sorted_keys]
 
+    elif camera_order == 'clustering':
+        from utils.scheduler_utils import ImageClustering  # 함수 내부에서 import
+        image_clustering = ImageClustering(colmap_path, n_clusters=n_clusters)
+        train_only_visibility_ids = []
+        for cluster_idx in range(image_clustering.n_clusters):
+            train_only_visibility_ids.extend(image_clustering.ordered_colmap_ids[cluster_idx])
+
+        sorted_keys = np.array(train_only_visibility_ids)
+        ordered_image_names = [colmap_images[key].name for key in sorted_keys]
 
     elif camera_order == 'PCA':
         image_idx_name = [[colmap_images[key].id, colmap_images[key].name] for key in colmap_images.keys()]

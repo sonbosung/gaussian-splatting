@@ -9,10 +9,10 @@ from utils.bundle_utils import cluster_cameras
 from utils.aug_utils import *
 
 
-def augment(colmap_path, image_path, augment_path, camera_order, visibility_aware_culling, compare_center_patch):
+def augment(colmap_path, image_path, augment_path, camera_order, visibility_aware_culling, compare_center_patch, n_clusters):
     colmap_images, colmap_points3D, colmap_cameras = get_colmap_data(colmap_path)
     np.seterr(divide='ignore', invalid='ignore')
-    sorted_keys = cluster_cameras(colmap_path, camera_order)
+    sorted_keys = cluster_cameras(colmap_path, camera_order, n_clusters=n_clusters)
 
     points3d = []
     points3d_rgb = []
@@ -220,6 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--compare_center_patch", 
                    action="store_true",
                    default=False)
+    parser.add_argument("--n_clusters", type=int, default=10)
     args = parser.parse_args()
     print("args.colmap_path", args.colmap_path)
     print("args.image_path", args.image_path)
@@ -227,4 +228,5 @@ if __name__ == "__main__":
     print("args.camera_order", args.camera_order)
     print("args.visibility_aware_culling", args.visibility_aware_culling)
     print("args.compare_center_patch", args.compare_center_patch)
-    augment(args.colmap_path, args.image_path, args.augment_path, args.camera_order, args.visibility_aware_culling, args.compare_center_patch)
+    print("args.n_clusters", args.n_clusters)
+    augment(args.colmap_path, args.image_path, args.augment_path, args.camera_order, args.visibility_aware_culling, args.compare_center_patch, args.n_clusters)
