@@ -30,7 +30,7 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
 
-        if load_iteration:
+        if load_iteration is not None:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
             else:
@@ -74,11 +74,12 @@ class Scene:
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, True)
 
-        if self.loaded_iter:
+        if self.loaded_iter is not None:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
+            print("Loaded Gaussians from iteration {}".format(self.loaded_iter))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
 

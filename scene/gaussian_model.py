@@ -141,6 +141,23 @@ class GaussianModel:
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+    
+    def get_scaling_slice(self, indices):
+        """
+        indices: 1D LongTensor 또는 리스트, 원하는 Gaussian 인덱스들
+        반환값: (len(indices), 3) scaling 값
+        """
+        return self.scaling_activation(self._scaling[indices])
+
+    def get_covariance_slice(self, indices, scaling_modifier=1):
+        """
+        indices: 1D LongTensor 또는 리스트, 원하는 Gaussian 인덱스들
+        scaling_modifier: 스케일 조정 인자 (기본값 1)
+        반환값: (len(indices), 6) covariance 벡터 (strip_symmetric 결과)
+        """
+        scaling = self.get_scaling_slice(indices) + torch.ones(indices.shape[0], 1, device="cuda") * 1e-6
+        rotation = self._rotation[indices]
+        return self.covariance_activation(scaling, scaling_modifier, rotation)
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -174,6 +191,42 @@ class GaussianModel:
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
+
+    def create_from_augmentor(self, augmentor):
+        # this will be called after self.create_from_pcd
+        augmented_point_cloud = torch.tensor(np.asarray(augmentor.merged_sample_points_world)).float().cuda()
+        # Convert OpenCV BGR to RGB before RGB2SH
+        rgb = np.asarray(augmentor.merged_sample_points_rgb) / 255.
+        augmented_color = RGB2SH(torch.tensor(rgb).float().cuda())
+        features = torch.zeros((augmented_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0] = augmented_color
+        features[:, 3:, 1:] = 0.0
+
+        print("Number of augmented points at initialisation : ", augmented_point_cloud.shape[0])
+        dist2 = torch.clamp_min(distCUDA2(augmented_point_cloud), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        rots = torch.zeros((augmented_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = self.inverse_opacity_activation(0.1 * torch.ones((augmented_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        # append the augmented points to the existing model
+        # Prepare the tensors to be concatenated
+        _xyz = nn.Parameter(augmented_point_cloud.requires_grad_(True))
+        _features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        _features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        _scaling = nn.Parameter(scales.requires_grad_(True))
+        _rotation = nn.Parameter(rots.requires_grad_(True))
+        _opacity = nn.Parameter(opacities.requires_grad_(True))
+        _max_radii2D = torch.zeros((augmented_point_cloud.shape[0]), device="cuda")
+
+        self._xyz = nn.Parameter(torch.cat((self._xyz, _xyz), dim=0))
+        self._features_dc = nn.Parameter(torch.cat((self._features_dc, _features_dc), dim=0))
+        self._features_rest = nn.Parameter(torch.cat((self._features_rest, _features_rest), dim=0))
+        self._scaling = nn.Parameter(torch.cat((self._scaling, _scaling), dim=0))
+        self._rotation = nn.Parameter(torch.cat((self._rotation, _rotation), dim=0))
+        self._opacity = nn.Parameter(torch.cat((self._opacity, _opacity), dim=0))
+        self.max_radii2D = torch.cat((self.max_radii2D, _max_radii2D), dim=0)
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -285,6 +338,7 @@ class GaussianModel:
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+        print(len(extra_f_names))
         assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
@@ -361,7 +415,10 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        self.tmp_radii = self.tmp_radii[valid_points_mask]
+        # self.tmp_radii = self.tmp_radii[valid_points_mask]
+        # tmp_radii가 존재하는 경우에만 처리
+        if hasattr(self, 'tmp_radii') and self.tmp_radii is not None:
+            self.tmp_radii = self.tmp_radii[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}

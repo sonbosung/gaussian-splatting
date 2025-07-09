@@ -156,8 +156,12 @@ class PartialGroupScheduler:
     def __init__(self, 
                  cameras,
                  grouped_names: dict, 
-                 densify_until_iter: int, 
-                 densify_from_iter: int, 
+                 densify_until_iter: int,
+                 densify_from_iter: int,
+                 mi_warmup: bool=False,
+                 bb: bool=False,
+                 similarity_grouping: bool=False,
+                 clustering=None,
                  debug: bool=False,
                  ):
         self.debug = debug
@@ -177,6 +181,13 @@ class PartialGroupScheduler:
         self.densify_and_prune_flag = False
         self.reset_opacity_flag = False
         self.random_group_uid_stack = None
+        self.mi_warmup = mi_warmup
+        self.bb = bb
+        self.similarity_grouping = similarity_grouping
+        if clustering:
+            self.clustering = clustering
+        if similarity_grouping:
+            self.assign_closest_n_views(n=20)
 
     def generate_dict_name_to_uid(self, cameras):
         """
@@ -189,6 +200,7 @@ class PartialGroupScheduler:
                     self.name_to_uid[name] = len(self.name_to_uid)
         else:   
             self.name_to_uid = {cam.image_name: cam.uid for cam in cameras}
+        self.uid_to_name = {v: k for k, v in self.name_to_uid.items()}
 
     def generate_ordered_uids(self):
         """
@@ -209,12 +221,41 @@ class PartialGroupScheduler:
         if iteration % 3000 == 0:
             self.reset_opacity_flag = True
         if iteration <= self.densify_from_iter or iteration > self.densify_until_iter:
-            # Warmup stage
-            if not self.uid_stack:
-                self.uid_stack = list(self.name_to_uid.values())
-            rand_idx = randint(0, len(self.uid_stack) - 1)
-            vind = self.uid_stack.pop(rand_idx)
-            return vind
+            if self.mi_warmup and iteration <= self.densify_from_iter:
+                if not self.uid_stack:
+                    self.uid_stack = list(self.name_to_uid.values())
+                if iteration % 2 == 1:
+                    rand_idx = randint(0, len(self.uid_stack) - 1)
+                    self.vind = self.uid_stack.pop(rand_idx)
+                    return self.vind
+                else:
+                    if self.bb:
+                        # 현재 뷰의 이름
+                        curr_view_name = self.uid_to_name[self.vind]
+                        
+                        # 남은 뷰들의 이름
+                        available_names = [self.uid_to_name[uid] for uid in self.uid_stack]
+                        
+                        # 현재 뷰와 남은 뷰들 간의 유사도 계산
+                        similarities = [(name, self.clustering.W_dict[curr_view_name][name]) for name in available_names]
+                        min_sim_name, min_sim_val = min(similarities, key=lambda x: x[1])
+                        # print(f"bb=True - Current view: {curr_view_name}, Least similar view: {min_sim_name}, whatifbb=False: {self.clustering.find_least_similar_view(self.uid_to_name[self.vind])} Similarity: {min_sim_val}")
+                        
+                        mi_name = min_sim_name
+                        mi_ind = self.name_to_uid[mi_name]
+                        self.uid_stack.remove(mi_ind)
+                        return mi_ind
+                    else:
+                        mi_name = self.clustering.find_least_similar_view(self.uid_to_name[self.vind])
+                        # print(f"bb=False - Current view: {self.uid_to_name[self.vind]}, Least similar view: {mi_name}, Similarity: {self.clustering.W_dict[self.uid_to_name[self.vind]][mi_name]}")
+                        mi_ind = self.name_to_uid[mi_name]
+                        return mi_ind
+            else:
+                if not self.uid_stack:
+                    self.uid_stack = list(self.name_to_uid.values())
+                rand_idx = randint(0, len(self.uid_stack) - 1)
+                vind = self.uid_stack.pop(rand_idx)
+                return vind
         else:
             # Densification stage
             iteration_in_stage = iteration - self.densify_from_iter
@@ -227,10 +268,17 @@ class PartialGroupScheduler:
             
             # 매 100번째 iteration의 다음 iteration에서 그룹 변경
             if step_in_stage == 1:
-                self.group_idx = stage % self.n_groups
-                self.group_names = self.grouped_names[self.group_idx]
-                self.group_uids = [self.name_to_uid[name] for name in self.group_names]
-                self.random_group_uid_stack = None
+                if self.similarity_grouping:
+                    self.group_seed = randint(0,len(self.name_to_uid.keys())-1)
+                    self.group_seed_name = self.uid_to_name[self.group_seed]
+                    self.group_names = self.closest_n_views[self.group_seed_name]
+                    self.group_uids = [self.name_to_uid[name] for name in self.group_names]
+                    self.random_group_uid_stack = None
+                else:
+                    self.group_idx = stage % self.n_groups
+                    self.group_names = self.grouped_names[self.group_idx]
+                    self.group_uids = [self.name_to_uid[name] for name in self.group_names]
+                    self.random_group_uid_stack = None
 
             # 앞 80회는 warmup과 동일
             if step_in_stage < 80:
@@ -246,6 +294,31 @@ class PartialGroupScheduler:
                 rand_idx = randint(0, len(self.random_group_uid_stack) - 1)
                 vind = self.random_group_uid_stack.pop(rand_idx)
                 return vind
+            
+    def assign_ImageClustering(self, clustering):
+        self.clustering = clustering
+
+    def find_least_similar_view(self, view_name: str) -> str:
+        """
+        주어진 시점과 가장 affinity가 낮은 시점을 찾습니다.
+        """
+        # print(f"\nfind_least_similar_view for {view_name}")
+        similarities = [(name, self.W_dict[view_name][name]) 
+                       for name in self.W_dict[view_name].keys() 
+                       if name != view_name]
+        # print("All similarities:", sorted(similarities, key=lambda x: x[1])[:5])
+        result = min(similarities, key=lambda x: x[1])[0]
+        # print(f"Selected: {result} with similarity {self.W_dict[view_name][result]}")
+        return result
+    
+    def assign_closest_n_views(self, n=20):
+        self.closest_n_views = {}
+        for view_name in self.clustering.W_dict.keys():
+            similarities = [(name, self.clustering.W_dict[view_name][name]) for name in self.clustering.W_dict[view_name].keys()]
+            similarities = [sim for sim in similarities if sim[0] != view_name]
+            similarities = sorted(similarities, key=lambda x: x[1], reverse=True)
+            closest_n_views = [name for name, _ in similarities[:n]]
+            self.closest_n_views[view_name] = closest_n_views
 
 class ImageClustering:
     def __init__(self,
@@ -281,9 +354,36 @@ class ImageClustering:
     
     def cluster_images(self):
         W = np.array(self.affinity_matrix)
+        # print("Original W shape:", W.shape)
+        # print("W min, max before inv:", W.min(), W.max())
+        
         if self.inv_affinity_matrix:
             W = 1 / (W+1)
+        # print("W min, max after inv:", W.min(), W.max())
+        
         self.W = (W - W.min()) / (W.max() - W.min())
+        # print("W min, max after norm:", self.W.min(), self.W.max())
+        
+        # 이름 기반 affinity dictionary 생성
+        self.W_dict = {}
+        for id1 in self.train_images.keys():
+            img_name1 = self.train_images[id1].name
+            self.W_dict[img_name1] = {}
+            idx1 = self.id_to_idx[id1]
+            for id2 in self.train_images.keys():
+                img_name2 = self.train_images[id2].name
+                idx2 = self.id_to_idx[id2]
+                self.W_dict[img_name1][img_name2] = self.W[idx1, idx2]
+            
+        # W_dict 값 확인
+        # print("\nSample W_dict values:")
+        sample_img = next(iter(self.W_dict))
+        # print(f"Values for {sample_img}:")
+        # print(sorted([(k,v) for k,v in self.W_dict[sample_img].items()], key=lambda x: x[1])[:5])
+        
+        # train_images의 순서를 리스트로 유지
+        train_image_list = list(self.train_images.items())
+        
         D = np.diag(self.W.sum(axis=1))
         D_inv_sqrt = np.diag(1.0 / np.sqrt(np.maximum(self.W.sum(axis=1), 1e-10)))
         L_sym = np.eye(len(self.W)) - D_inv_sqrt @ self.W @ D_inv_sqrt
@@ -300,7 +400,7 @@ class ImageClustering:
                 clusters = kmeans.fit_predict(U_norm)
                 sscore = silhouette_score(U_norm, clusters)
                 self.score.append(sscore)
-                print(f"{i} clusters, silhouette score: {sscore}")
+                # print(f"{i} clusters, silhouette score: {sscore}")
             self.n_clusters = int(input("select number of clusters: "))
         U = self.eigenvectors[:, :self.n_clusters]
         U_norm = normalize(U, norm='l2')
@@ -379,3 +479,16 @@ class ImageClustering:
         for i in range(self.n_clusters):
             self.ordered_cluster_names[i] = [self.images[id].name for id in self.ordered_colmap_ids[i]]
         # print("Ordered cluster names: ", self.ordered_cluster_names)
+
+    def find_least_similar_view(self, view_name: str) -> str:
+        """
+        주어진 시점과 가장 affinity가 낮은 시점을 찾습니다.
+        """
+        # print(f"\nfind_least_similar_view for {view_name}")
+        similarities = [(name, self.W_dict[view_name][name]) 
+                       for name in self.W_dict[view_name].keys() 
+                       if name != view_name]
+        # print("All similarities:", sorted(similarities, key=lambda x: x[1])[:5])
+        result = min(similarities, key=lambda x: x[1])[0]
+        # print(f"Selected: {result} with similarity {self.W_dict[view_name][result]}")
+        return result
