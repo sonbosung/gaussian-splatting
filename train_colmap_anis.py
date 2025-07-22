@@ -61,7 +61,7 @@ def training(dataset,
              n_clusters,
              inv_affinity_matrix,
              similarity_grouping,
-             augmentation=True
+             augmentation=False
              ):
     """
     Main training function.
@@ -115,6 +115,8 @@ def training(dataset,
     print("Initializing Gaussians with Quadtree-based initialization...")
     initializer.run()
     print("Initialization for SfM 3D points complete.")
+    print("This program only initializes colmap SfM 3D points, skips augmentation.")
+    
 
     if augmentation:
         print("Starting augmentation process...")
@@ -130,6 +132,7 @@ def training(dataset,
         print("Augmentation process complete.")
 
     scene.save(0)
+    exit(0)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")

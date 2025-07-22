@@ -21,9 +21,11 @@ from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 from tqdm import tqdm
-from utils.image_utils import psnr
+from utils.image_utils import psnr, psnr_test
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from quadtree_based_initialization import QuadtreeInitDataset, GaussianInitializer
+from utils.scheduler_utils import ImageClustering, PartialGroupScheduler
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -55,6 +57,11 @@ def training(dataset,
              enable_ds_lap,
              lambda_ds,
              lambda_lap,
+             n_clusters,
+             inv_affinity_matrix,
+             enable_visualization,
+             similarity_grouping,
+             augmentation=True
              ):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -65,10 +72,45 @@ def training(dataset,
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+    if opt.iterations > -1:
+        initdataset = QuadtreeInitDataset(
+            os.path.join(dataset.source_path, dataset.images),
+            os.path.join(dataset.source_path, 'sparse/0'),
+        )
+        initializer = GaussianInitializer(
+            gaussians=gaussians,
+            cameras=scene.getTrainCameras().copy(),
+            dataset=initdataset,
+            pipe=pipe,
+            background=background,
+            gs_dataset=dataset,
+            opt=opt,
+            args=args,
+        )
+        print("Initializing Gaussians with Quadtree-based initialization")
+        
+        initializer.run()
+        print("Initialization for SfM 3D points complete")
 
+        if augmentation:
+            initializer.augmentation_mode()
+            # Add augmented gaussians to the scene
+            gaussians.create_from_augmentor(initializer.dataset.augmentor)
+            gaussians.training_setup(opt)
+            initializer.run_for_augmentation()
+            test_exclude_indices = initializer.dataset.test_only_3d_indices
+            test_exclude_mask = torch.zeros((gaussians.get_xyz.shape[0]), dtype=torch.bool, device="cuda")
+            test_exclude_mask[test_exclude_indices] = True
+            gaussians.prune_points(test_exclude_mask)
+            gaussians.training_setup(opt)
+        scene.save(0)
+        # return
+    
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -86,18 +128,16 @@ def training(dataset,
     name_to_uid = {cam.image_name: cam.uid for cam in scene.getTrainCameras()}
     cameras = scene.getTrainCameras().copy()
     if bundle_training:
-        ordered_image_names = cluster_cameras(os.path.join(dataset.source_path, 'sparse/0'),
-                                              camera_order,
-                                              output_type="name")
-        ordered_uids = [name_to_uid[name] for name in ordered_image_names]
-        start_indices, cluster_sizes = bundle_start_index_generator(ordered_uids, 20)
-        n_interval = 0
-        group_uid_stack = ordered_uids.copy()
+        clustering = ImageClustering(dataset.source_path+"/sparse/0",n_clusters=n_clusters, inv_affinity_matrix=inv_affinity_matrix)
+        scheduler = PartialGroupScheduler(cameras, clustering.ordered_cluster_names,
+                                   densify_until_iter = opt.densify_until_iter,
+                                   densify_from_iter = opt.densify_from_iter,
+                                   debug = False,
+                                   similarity_grouping = similarity_grouping,
+                                   clustering = clustering)
 
     psnr_log = []
     ssim_log = []
-
-    scene.save(0)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -125,30 +165,9 @@ def training(dataset,
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        if bundle_training and iteration < opt.densify_until_iter and iteration > opt.densify_from_iter and iteration % 100 >= 80:
-            if iteration % 100 == 80:
-                start_idx = start_indices[n_interval] % len(ordered_uids)
-                end_idx = start_idx + 20
-                if end_idx <= len(ordered_uids):
-                    group_uid_stack = ordered_uids[start_idx:end_idx].copy()
-                else:
-                    first_part = ordered_uids[start_idx:].copy()
-                    second_part = ordered_uids[:end_idx % len(ordered_uids)].copy()
-                    group_uid_stack = first_part + second_part
-        
-            rand_idx = randint(0, len(group_uid_stack) - 1)
-            vind = group_uid_stack.pop(rand_idx)
+        if bundle_training:
+            vind = scheduler.scheduled_training_index(iteration)
             viewpoint_cam = cameras[vind]
-
-
-        # if bundle_training and iteration < opt.densify_until_iter and iteration > opt.densify_from_iter and cluster_sizes[n_interval] < 160 and iteration % 100 > 80:
-        #     densification_viewpoint_stack = scene.getTrainCameras().copy()
-        #     selected_idx = adaptive_cluster(start_indices[n_interval], sorted_keys, cluster_sizes[n_interval])
-        #     if selected_idx >= len(densification_viewpoint_stack):
-        #         selected_idx = selected_idx % len(densification_viewpoint_stack)
-        #     viewpoint_cam = densification_viewpoint_stack[selected_idx]
-
-
         else:
             if not viewpoint_stack:
                 viewpoint_stack = scene.getTrainCameras().copy()
@@ -217,12 +236,11 @@ def training(dataset,
                 progress_bar.close()
 
             if iteration % 1000 == 0:
-                # Debug the quantization effect for the first two testing iterations
-                debug_quant = iteration in testing_iterations[:2]
-                psnr_test, ssim_test = evaluate_test_images(scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp))
-                psnr_log.append((iteration, psnr_test))
-                ssim_log.append((iteration, ssim_test))
-                print(f"\n[ITER {iteration}] Test PSNR: {psnr_test:.4f}, Test SSIM: {ssim_test:.4f}")
+                avg_psnr, avg_ssim = evaluate_test_images(scene, render, (pipe, background, dataset.train_test_exp, SPARSE_ADAM_AVAILABLE), iteration, tb_writer)
+                psnr_log.append((iteration, avg_psnr))
+                ssim_log.append((iteration, avg_ssim))
+
+                print(f"[ITER {iteration}] Test PSNR: {avg_psnr:.4f}, Test SSIM: {avg_ssim:.4f}")
 
             # Log and save
             training_report(tb_writer, 
@@ -253,14 +271,22 @@ def training(dataset,
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-                    if bundle_training:
-                        n_interval += 1
-                
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                if bundle_training:
+                    if scheduler.densify_and_prune_flag:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                        scheduler.densify_and_prune_flag = False
+                    
+                    if scheduler.reset_opacity_flag:
+                        gaussians.reset_opacity()
+                        scheduler.reset_opacity_flag = False
+                else:
+                    if iteration % opt.densification_interval == 0:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                    if iteration % opt.opacity_reset_interval == 0:
+                        gaussians.reset_opacity()
+
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -277,17 +303,19 @@ def training(dataset,
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+    
+    psnr_log_path = os.path.join(scene.model_path, "psnr_log.txt")
+    ssim_log_path = os.path.join(scene.model_path, "ssim_log.txt")
+    with open(psnr_log_path, 'w') as f:
+        for iter_num, psnr_value in psnr_log:
+            f.write(f"{iter_num}: {psnr_value:.4f}\n")
 
-    log_training_results(scene.model_path, "psnr_log.txt", psnr_log)
-    log_training_results(scene.model_path, "ssim_log.txt", ssim_log)
-
-def log_training_results(model_path, filename, log_data):
-    """Saves training metrics to a log file."""
-    log_path = os.path.join(model_path, filename)
-    with open(log_path, 'w') as f:
-        for iter_num, value in log_data:
-            f.write(f"{iter_num}: {value:.4f}\n")
-    print(f"Log saved to {log_path}")
+    with open(ssim_log_path, 'w') as f:
+        for iter_num, ssim_value in ssim_log:
+            f.write(f"{iter_num}: {ssim_value:.4f}\n")
+    print(f"PSNR log saved to {psnr_log_path}")
+    print(f"SSIM log saved to {ssim_log_path}")
+    print("Training complete. Gaussians saved to {}".format(scene.model_path))
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -373,23 +401,41 @@ def training_report(tb_writer,
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
-def evaluate_test_images(scene, render_func, render_args):
+def evaluate_test_images(scene, render_func, render_args, iteration, tb_writer=None):
     """
-    Renders all test images and calculates average PSNR and SSIM.
-    Includes a debug mode to check the effect of uint8 quantization on PSNR.
+    모든 테스트 이미지에 대해 렌더링을 수행하고 PSNR 및 SSIM을 계산합니다.
     """
     test_cameras = scene.getTestCameras()
-    psnr_test = 0.0
-    ssim_test = 0.0
-    for camera in test_cameras:
+    total_psnr = 0.0
+    total_ssim = 0.0
+    num_images = len(test_cameras)
+
+    for idx, camera in enumerate(test_cameras):
+        # 렌더링 수행
         rendered_image = torch.clamp(render_func(camera, scene.gaussians, *render_args)["render"], 0.0, 1.0)
         gt_image = torch.clamp(camera.original_image.to("cuda"), 0.0, 1.0)
-        psnr_test += psnr(rendered_image, gt_image).mean().double()
-        ssim_test += ssim(rendered_image, gt_image).mean().double()
-    psnr_test /= len(test_cameras)
-    ssim_test /= len(test_cameras)
-    torch.cuda.empty_cache()
-    return psnr_test, ssim_test
+
+
+        rendered_image = rendered_image[..., rendered_image.shape[-1] // 2:]
+        gt_image = gt_image[..., gt_image.shape[-1] // 2:]
+
+        # PSNR 및 SSIM 계산 (metrics.py와 동일한 방식)
+        psnr_value = psnr(rendered_image, gt_image).mean().double()
+        ssim_value = ssim(rendered_image, gt_image).mean().double()
+
+        total_psnr += psnr_value
+        total_ssim += ssim_value
+
+        # TensorBoard에 기록 (배치 차원이 이미 있으므로 unsqueeze 불필요)
+        if tb_writer and idx < 5:
+            tb_writer.add_images(f"test_images/rendered_{idx}", rendered_image, global_step=iteration)
+            tb_writer.add_images(f"test_images/ground_truth_{idx}", gt_image, global_step=iteration)
+
+    # 평균 PSNR 및 SSIM 계산
+    avg_psnr = total_psnr / idx
+    avg_ssim = total_ssim / idx
+
+    return avg_psnr, avg_ssim
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -412,6 +458,10 @@ if __name__ == "__main__":
     parser.add_argument("--enable_ds_lap", action='store_true', default=False)
     parser.add_argument("--lambda_ds", type=float, default=0.0)
     parser.add_argument("--lambda_lap", type=float, default=0.0)
+    parser.add_argument("--n_clusters", type=int, default=5)
+    parser.add_argument("--inv_affinity_matrix", action='store_true', default=False)
+    parser.add_argument("--enable_visualization", action='store_true', default=False)
+    parser.add_argument("--similarity_grouping", action='store_true', default=False)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -436,7 +486,11 @@ if __name__ == "__main__":
              args.bundle_training,
              args.enable_ds_lap,
              args.lambda_ds,
-             args.lambda_lap)
+             args.lambda_lap,
+             args.n_clusters,
+             args.inv_affinity_matrix,
+             args.enable_visualization,
+             args.similarity_grouping)
     # 학습에 사용된 인자들을 로그 파일에 기록
     log_file = os.path.join(args.model_path, "training_args.log")
     with open(log_file, "w") as f:

@@ -155,7 +155,7 @@ class GaussianModel:
         scaling_modifier: 스케일 조정 인자 (기본값 1)
         반환값: (len(indices), 6) covariance 벡터 (strip_symmetric 결과)
         """
-        scaling = self.get_scaling_slice(indices) + torch.ones(indices.shape[0], 1, device="cuda") * 1e-6
+        scaling = self.get_scaling_slice(indices)
         rotation = self._rotation[indices]
         return self.covariance_activation(scaling, scaling_modifier, rotation)
 
