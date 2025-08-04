@@ -11,13 +11,25 @@ from scene.gaussian_model import GaussianModel
 from utils.general_utils import build_scaling_rotation
 from utils.sh_utils import SH2RGB
 from gaussian_renderer import render, network_gui
+import sys
+import traceback
+import sys
+import traceback
+import pdb
+
+def info(type, value, tb):
+    traceback.print_exception(type, value, tb)
+    print("\nException occurred! Launching debugger...\n")
+    pdb.post_mortem(tb)
+
+sys.excepthook = info
 
 class GaussianInitializer:
     """
     Initializes Gaussian attributes (features, scaling, rotation) based on 2D covariance
     information derived from a quadtree decomposition of the input images.
     """
-    def __init__(self, gaussians, cameras, dataset, n_steps=100000, lr=1e-2, batch_size=256, pipe=None, background=None, gs_dataset=None, opt=None, args=None):
+    def __init__(self, gaussians, cameras, dataset, n_steps=100000, lr=1e-3, batch_size=256, pipe=None, background=None, gs_dataset=None, opt=None, args=None):
         self.gaussians = gaussians
         self.cameras = cameras
         self.dataset = dataset
@@ -41,6 +53,27 @@ class GaussianInitializer:
         self.gs_dataset = gs_dataset
         self.opt = opt
         self.mode = "sfm"  # Initial mode is 'sfm', can be switched to 'augmentation'
+
+        # self.image_name_gsid = {camera.image_name: idx for idx, camera in enumerate(cameras)}
+        # self.dataset.convert_image_ids_gs(self.image_name_gsid)
+
+    def camera_ids_to_indices(self):
+        colmap_image_id_names = {id: colmap_image.name for (id, colmap_image) in self.dataset.augmentor.colmap_images.items()}
+        camera_name_index = {camera.image_name: idx for idx, camera in enumerate(self.cameras)}
+        colmap_image_id_to_camera_index = {}
+        for id, name in colmap_image_id_names.items():
+            if name in camera_name_index.keys():
+                colmap_image_id_to_camera_index[id] = camera_name_index[name]
+
+        to_delete = []
+        for i, (_, colmap_image_id, _, _) in enumerate(self.dataset.p3d_image_id_matrix):
+            if colmap_image_id not in colmap_image_id_to_camera_index.keys():
+                to_delete.append(i)
+            else:
+                self.dataset.p3d_image_id_matrix[i][1] = colmap_image_id_to_camera_index[colmap_image_id]
+
+        print(f"Filtered {len(to_delete)} entries corresponding to test cameras.")
+        self.colmap_image_id_to_camera_index = colmap_image_id_to_camera_index
 
     def _verify_jacobian_numerically(self, pmat, xyz, K, Rt, epsilon=1e-6):
         """
@@ -112,9 +145,9 @@ class GaussianInitializer:
         # --- End of DEBUG ---
 
         params = [
-            {'params': [self.gaussians._features_dc], 'lr': self.lr*0.1, "name": "features_dc"},
-            {'params': [self.gaussians._scaling], 'lr': self.lr*2.0, "name": "scaling"},
-            {'params': [self.gaussians._rotation], 'lr': self.lr*0.1, "name": "rotation"}
+            {'params': [self.gaussians._features_dc], 'lr': self.lr, "name": "features_dc"},
+            {'params': [self.gaussians._scaling], 'lr': self.lr, "name": "scaling"},
+            {'params': [self.gaussians._rotation], 'lr': self.lr, "name": "rotation"}
         ]
         optimizer = torch.optim.Adam(params)
         
@@ -235,7 +268,11 @@ class GaussianInitializer:
         pred_cov = self.gaussians.get_covariance_slice(point_indices)
         pred_cov3d = self.uppertri_to_symm(pred_cov)
         pred_cov2d = self.project_cov3d_to_2d_batch(pred_cov3d, J_batch)
-        kl_loss = self.kl_divergence_2d_gaussian(None, gt_cov, None, pred_cov2d)
+        # kl_loss = self.kl_divergence_2d_gaussian(None, gt_cov, None, pred_cov2d)
+        airm_distance = self.airm_distance(gt_cov, pred_cov2d)
+        size_reg_loss = self.size_regularization_logdet(pred_cov2d, gt_cov, weight=0.1)
+        eigenvalue_max = self.compute_max_eigenvalue(pred_cov2d)
+        # longaxisloss = torch.mean((eigenvalue_max - 1.0) ** 2)
 
         # # Add a small identity matrix for numerical stability
         # epsilon = 1e-6
@@ -263,7 +300,14 @@ class GaussianInitializer:
         # if torch.rand(1) < 0.01:
         #     print(f"DEBUG: Step {self.iteration}, Shape Loss: {shape_loss.item()}, Det Loss: {det_loss.item()}")
         # return shape_loss + 0.1 * det_loss
-        return kl_loss
+        # return kl_loss + longaxisloss
+        return airm_distance.mean() + size_reg_loss
+    
+    def size_regularization_logdet(self, sigma_pred, sigma_gt, weight=1.0):
+        logdet_pred = torch.logdet(sigma_pred)
+        logdet_gt = torch.logdet(sigma_gt)
+        reg = torch.relu(logdet_gt - logdet_pred)  # Only penalize when predicted is smaller
+        return weight * reg.mean()
 
 
     def _handle_gui_connection(self):
@@ -324,26 +368,34 @@ class GaussianInitializer:
         symm_matrix[:, 2, 1] = symm_matrix[:, 1, 2]  # yz
         
         return symm_matrix
+    
+    def compute_max_eigenvalue(self, covmat2D):
+        a = covmat2D[:, 0, 0]
+        c = covmat2D[:, 0, 1]
+        b = covmat2D[:, 1, 1]
 
-    def camera_ids_to_indices(self):
-        """Maps COLMAP image IDs to camera indices used in the training scene."""
-        colmap_image_id_names = {id: colmap_image.name for id, colmap_image in self.dataset.augmentor.colmap_images.items()}
-        camera_name_index = {camera.image_name: idx for idx, camera in enumerate(self.cameras)}
-        
-        self.colmap_image_id_to_camera_index = {}
-        for id, name in colmap_image_id_names.items():
-            if name in camera_name_index:
-                self.colmap_image_id_to_camera_index[id] = camera_name_index[name]
+        lambda_max = (a + b) / 2 + torch.sqrt(((a - b) / 2) ** 2 + c ** 2)
+        return lambda_max
 
-        valid_entries = []
-        for entry in self.dataset.p3d_image_id_matrix:
-            colmap_image_id = entry[1]
-            if colmap_image_id in self.colmap_image_id_to_camera_index:
-                entry[1] = self.colmap_image_id_to_camera_index[colmap_image_id]
-                valid_entries.append(entry)
+    # def camera_ids_to_indices(self):
+    #     """Maps COLMAP image IDs to camera indices used in the training scene."""
+    #     colmap_image_id_names = {id: colmap_image.name for id, colmap_image in self.dataset.augmentor.colmap_images.items()}
+    #     camera_name_index = {camera.image_name: idx for idx, camera in enumerate(self.cameras)}
         
-        print(f"Filtered {len(self.dataset.p3d_image_id_matrix) - len(valid_entries)} entries corresponding to test cameras.")
-        self.dataset.p3d_image_id_matrix = valid_entries
+    #     self.colmap_image_id_to_camera_index = {}
+    #     for id, name in colmap_image_id_names.items():
+    #         if name in camera_name_index:
+    #             self.colmap_image_id_to_camera_index[id] = camera_name_index[name]
+
+    #     valid_entries = []
+    #     for entry in self.dataset.p3d_image_id_matrix:
+    #         colmap_image_id = entry[1]
+    #         if colmap_image_id in self.colmap_image_id_to_camera_index:
+    #             entry[1] = self.colmap_image_id_to_camera_index[colmap_image_id]
+    #             valid_entries.append(entry)
+        
+    #     print(f"Filtered {len(self.dataset.p3d_image_id_matrix) - len(valid_entries)} entries corresponding to test cameras.")
+    #     self.dataset.p3d_image_id_matrix = valid_entries
 
     def project_cov3d_to_2d_batch(self, cov3d_batch, J_batch):
         """Projects a batch of 3D covariance matrices to 2D."""
@@ -427,6 +479,35 @@ class GaussianInitializer:
 
         kl = 0.5 * (log_det_term + trace_term - k)
         return kl.mean()
+    
+    def matrix_sqrt_inv(self, mat):
+        # Compute the inverse square root of a SPD matrix (batch of 2x2)
+        eigvals, eigvecs = torch.linalg.eigh(mat)  # eigvals: (B, 2), eigvecs: (B, 2, 2)
+        sqrt_inv = eigvecs @ torch.diag_embed(1.0 / torch.sqrt(eigvals)) @ eigvecs.transpose(-2, -1)
+        return sqrt_inv
+
+    def matrix_log(self, mat):
+        # Compute the matrix logarithm of a SPD matrix (batch of 2x2)
+        eigvals, eigvecs = torch.linalg.eigh(mat)
+        log_eigvals = torch.log(eigvals)
+        return eigvecs @ torch.diag_embed(log_eigvals) @ eigvecs.transpose(-2, -1)
+
+    def airm_distance(self, sigma1: torch.Tensor, sigma2: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the Affine-Invariant Riemannian Metric between batches of SPD 2x2 matrices.
+
+        Args:
+            sigma1: Tensor of shape (B, 2, 2)
+            sigma2: Tensor of shape (B, 2, 2)
+
+        Returns:
+            Tensor of shape (B,) with AIRM distances
+        """
+        sigma1_inv_sqrt = self.matrix_sqrt_inv(sigma1)
+        middle = sigma1_inv_sqrt @ sigma2 @ sigma1_inv_sqrt
+        log_middle = self.matrix_log(middle)
+        frob_norm = torch.linalg.norm(log_middle, dim=(1, 2))
+        return frob_norm
 
 class QuadtreeInitDataset(Dataset):
     """
@@ -442,10 +523,10 @@ class QuadtreeInitDataset(Dataset):
         self.scale = 1
         print(f"Scale set to {self.scale}! This is used to scale the covariance matrix.")
         
-        self._compute_image_gradients()
-        self.create_p3d_image_id_matrix()
-        self.mode = "sfm"
-        self.n_colmap_points = len(self.augmentor.colmap_points3D)
+        # self._compute_image_gradients()
+        # self.create_p3d_image_id_matrix()
+        # self.mode = "sfm"
+        # self.n_colmap_points = len(self.augmentor.colmap_points3D)
 
     def _load_or_create_augmentor(self):
         """Loads a pre-existing augmentor or creates a new one."""
@@ -472,38 +553,362 @@ class QuadtreeInitDataset(Dataset):
         self.iys = {}
         for image_id, image in images.items():
             gauss = cv2.GaussianBlur(image, (5, 5), 0)
-            self.ixs[image_id] = cv2.Sobel(gauss, cv2.CV_64F, 1, 0, ksize=5)
-            self.iys[image_id] = cv2.Sobel(gauss, cv2.CV_64F, 0, 1, ksize=5)
+            self.ixs[image_id] = cv2.blur(cv2.Sobel(gauss, cv2.CV_64F, 1, 0, ksize=5), (5, 5))
+            self.iys[image_id] = cv2.blur(cv2.Sobel(gauss, cv2.CV_64F, 0, 1, ksize=5), (5, 5))
 
     def gradient_to_covariance(self, image_id, point2D_coord, corresponding_width):
         """Converts image gradients to a 2D covariance matrix."""
+        # import pdb; pdb.set_trace()
         point2D_coordx, point2D_coordy = point2D_coord
         ix = self.ixs[image_id][point2D_coordy, point2D_coordx]
         iy = self.iys[image_id][point2D_coordy, point2D_coordx]
-        
-        # if abs(ix) < 1e-3 and abs(iy) < 1e-3:
-        #     cov_matrix = np.asarray([[corresponding_width**2 / 36, 0], [0, corresponding_width**2 / 36]])
-        # elif abs(ix) < 1e-3:
-        #     cov_matrix = np.asarray([[corresponding_width**2 / (36 * 9), 0], [0, corresponding_width**2 / 36]])
-        # elif abs(iy) < 1e-3:
-        #     cov_matrix = np.asarray([[corresponding_width**2 / 36, 0], [0, corresponding_width**2 / (36 * 9)]])
-        # else:
-        #     structure_tensor = np.array([[ix**2, ix * iy], [ix * iy, iy**2]]) + 1e-6
-        #     eigvals, eigvecs = np.linalg.eigh(structure_tensor)
-        #     eigvals_max = np.max(eigvals)
-        #     eigvals = np.maximum(eigvals / eigvals_max, 0.2)
-        #     eigvals = np.clip(eigvals, 0.2, 1.0)
-        #     eigvals = np.sqrt(eigvals) * corresponding_width / 6
-        #     scale_matrix = np.diag([eigvals[1], eigvals[0]])
-        #     cov_matrix = eigvecs @ scale_matrix @ scale_matrix @ eigvecs.T
-        structure_tensor = np.array([[ix**2, ix * iy], [ix * iy, iy**2]])
-        eigvals, eigvecs = np.linalg.eigh(structure_tensor)
-        eigvals = np.maximum(eigvals, 1e-6) # Ensures no zero eigenvalues
-        # Eigvals are sorted in ascending order
-        s = np.sqrt(eigvals[0])
-        sigma = np.diag(np.maximum(s / np.sqrt(eigvals), 0.33))
-        cov_matrix = eigvecs @ sigma @ sigma @ eigvecs.T
+        grad_image = np.asarray([[ix, iy]])
+        grad_magnitude = np.linalg.norm(grad_image)
+        alpha = 1 / (1 + np.exp(-grad_magnitude))
+        structure_tensor = np.array([[ix * ix, ix * iy], [ix * iy, iy * iy]])
+        eigenvalues, eigenvectors = np.linalg.eigh(structure_tensor)
+        s = eigenvalues[0] + 1e-3
+        anisotropic_part = np.diag(s/(eigenvalues + 1e-3))
+        anisotropic_part[1,1] = np.clip(anisotropic_part[1,1], 0.1, None)
+        scale_matrix = alpha * anisotropic_part + (1 - alpha) * np.diag([1., 1.])
+        cov_matrix = eigenvectors @ scale_matrix @ eigenvectors.T
         return cov_matrix
+    
+    def computeWorldToPix(self, point3Dcoord, image_id):
+        """Computes the 2D pixel coordinates from a 3D point using the camera's projection matrix."""
+        intrinsic_matrix = self.augmentor.intrinsics_camera[1]
+        rotation_matrix = self.augmentor.rotations_image[image_id]
+        translation_vector = self.augmentor.translations_image[image_id]
+
+        # Convert 3D point to homogeneous coordinates
+        X = point3Dcoord.reshape(3, 1)
+        
+        # Apply camera transformation
+        Xh_cam = rotation_matrix @ X + translation_vector.reshape(3, 1)
+
+        # Project to pixel coordinates
+        Xh_pix = intrinsic_matrix @ Xh_cam
+        x_pix, y_pix = Xh_pix[:2] / Xh_pix[2]
+        
+        return x_pix, y_pix
+    
+    def compute_depth(self, point3Dcoord, image_id):
+        rotation_matrix = self.augmentor.rotations_image[image_id]
+        translation_vector = self.augmentor.translations_image[image_id].reshape(3,1)
+        X = point3Dcoord.reshape(3, 1)
+        Xcam = rotation_matrix @ X + translation_vector
+        depth = Xcam[2, 0]  # Z coordinate in camera space
+        return depth
+    
+    def compute_scales(self, depths):
+        depths = np.asarray(depths)
+        depth_mean = np.mean(depths)
+        return (depth_mean / depths) ** 2
+
+
+    #################################################
+    # This part is for directly predicting 3D covariance matrices from COLMAP 3D points.
+
+    def vech(self, matrix):
+        n = matrix.shape[0]
+        if matrix.shape[1] == matrix.shape[2] == 2:
+            vech_matrix = np.zeros((n, 3))
+            vech_matrix[:, 0] = matrix[:, 0, 0]
+            vech_matrix[:, 1] = matrix[:, 1, 1]
+            vech_matrix[:, 2] = matrix[:, 0, 1]
+        return vech_matrix
+    
+    def kroneckerJacobianMatrices(self, jacobian_matrices):
+        n_images = jacobian_matrices.shape[0]
+        J = np.zeros((n_images, 3, 6))
+        j11 = jacobian_matrices[:, 0, 0]
+        j12 = jacobian_matrices[:, 0, 1]
+        j13 = jacobian_matrices[:, 0, 2]
+        j21 = jacobian_matrices[:, 1, 0]
+        j22 = jacobian_matrices[:, 1, 1]
+        j23 = jacobian_matrices[:, 1, 2]
+        J[:, 0, 0] = j11**2
+        J[:, 0, 1] = j12**2
+        J[:, 0, 2] = j13**2
+        J[:, 0, 3] = 2*j11*j12
+        J[:, 0, 4] = 2*j11*j13
+        J[:, 0, 5] = 2*j12*j13
+        J[:, 1, 0] = j21**2
+        J[:, 1, 1] = j22**2
+        J[:, 1, 2] = j23**2
+        J[:, 1, 3] = 2*j21*j22
+        J[:, 1, 4] = 2*j21*j23
+        J[:, 1, 5] = 2*j22*j23
+        J[:, 2, 0] = j11*j21
+        J[:, 2, 1] = j12*j22
+        J[:, 2, 2] = j13*j23
+        J[:, 2, 3] = j11*j22 + j12*j21
+        J[:, 2, 4] = j11*j23 + j13*j21
+        J[:, 2, 5] = j12*j23 + j13*j22
+        return J.reshape(n_images*3, 6)
+
+    def cholesky_to_sigma3D(self, params):
+        l00 = np.exp(params[0])
+        l11 = np.exp(params[1])
+        l22 = np.exp(params[2])
+        l01 = params[3]
+        l02 = params[4]
+        l12 = params[5]
+
+        L = np.array([[l00, 0, 0],
+                      [l01, l11, 0],
+                      [l02, l12, l22]])
+        return L @ L.T
+    
+    def sigma3D_to_vech(self, sigma3D):
+        return np.array([
+            sigma3D[0, 0],  # xx
+            sigma3D[1, 1],  # yy
+            sigma3D[2, 2],  # zz
+            sigma3D[0, 1],  # xy
+            sigma3D[0, 2],  # xz
+            sigma3D[1, 2]   # yz
+        ])
+    
+    def loss_fn_cholesky(self, params, J, cov2D_vech):
+        Sigma3D = self.cholesky_to_sigma3D(params)
+        n = J.shape[0] // 3
+        proj_cov2D_vech = np.zeros((n, 3))
+        for i in range(n):
+            Ji = J[3*i:3*(i+1)]
+            x = self.sigma3D_to_vech(Sigma3D)
+            proj_cov2D_vech[i] = Ji @ x
+
+        residual = proj_cov2D_vech.reshape(-1) - cov2D_vech.reshape(-1)
+        return np.sum(residual**2)
+    
+    def computeJacobianMatrices(self, point3Dcoord, imageids, Ks, Rs, ts):
+        """
+        Computes the Jacobian matrices for the 3D points based on the provided parameters.
+        """
+        assert len(imageids) == Ks.shape[0] == Rs.shape[0] == ts.shape[0], "Batch dimensions must match"
+        n_images = len(imageids)
+        X_world = point3Dcoord.reshape(-1, 3, 1)
+        X_cam = np.matmul(Rs, X_world) + ts
+        X_cam = X_cam.reshape(n_images, 3)
+        J = np.zeros((n_images, 2, 3))  # Jacobian for each image
+        J[:, 0, 0] = Ks[:, 0, 0] / X_cam[:, 2]
+        J[:, 1, 1] = Ks[:, 1, 1] / X_cam[:, 2]
+        J[:, 0, 2] = -Ks[:, 0, 0] * X_cam[:, 0] / (X_cam[:, 2] ** 2)
+        J[:, 1, 2] = -Ks[:, 1, 1] * X_cam[:, 1] / (X_cam[:, 2] ** 2)
+        J = np.matmul(J, Rs)
+        # Returns (n_images, 2, 3) Jacobian matrices
+        return J
+
+    def solveCholeskyMinimizeCov2D3D(self, **kwargs):
+        assert "point3Dcoord" in kwargs, "point3Dcoord must be provided"
+        assert "image_ids" in kwargs, "image_ids must be provided"
+        assert "cov2Dmatrix" in kwargs, "cov2Dmatrix must be provided"
+        assert len(kwargs["image_ids"]) == len(kwargs["cov2Dmatrix"]), "image_ids and cov2Dmatrix must have the same length"
+        assert len(kwargs["image_ids"]) > 0, "At least one image ID must be provided"
+
+        from scipy.optimize import minimize
+        jacobian_matrices = self.computeJacobianMatrices(kwargs["point3Dcoord"],
+                                                            kwargs["image_ids"],
+                                                         np.asarray([self.augmentor.intrinsics_camera[self.augmentor.colmap_images[image_id].camera_id] for image_id in kwargs["image_ids"]]),
+                                                         np.asarray([self.augmentor.rotations_image[image_id] for image_id in kwargs["image_ids"]]),
+                                                         np.asarray([self.augmentor.translations_image[image_id].reshape(3, 1) for image_id in kwargs["image_ids"]]))
+        assert jacobian_matrices.shape[0] == len(kwargs["image_ids"])
+        assert jacobian_matrices.shape[1] == 2
+        assert jacobian_matrices.shape[2] == 3
+
+        if len(kwargs["cov2Dmatrix"]) > 1:
+            cov2Dmatrices = np.asarray([
+                kwargs["cov2Dmatrix"]
+            ]).reshape((len(kwargs["image_ids"]), 2, 2))
+        else:
+            return None
+
+        vech_c2D = self.vech(cov2Dmatrices)
+        J = self.kroneckerJacobianMatrices(jacobian_matrices)
+
+        init_params = np.array([0., 0., 0., 0., 0., 0.])
+        result = minimize(self.loss_fn_cholesky, init_params, args=(J, vech_c2D), method='L-BFGS-B')
+
+        Sigma3D_est = self.cholesky_to_sigma3D(result.x)
+        return Sigma3D_est
+    
+    def computeJacobian(self, camcoords, K, R):
+        assert camcoords.shape[0] == K.shape[0] == R.shape[0], "Batch dimensions must match"
+        B = camcoords.shape[0]
+        camcoords = camcoords.reshape(B, 3)  # Ensure camcoords is (B, 3)
+        K = K.reshape(B, 3, 3)  # Ensure K is (B, 3, 3)
+        R = R.reshape(B, 3, 3)  # Ensure R is (B, 3, 3)
+
+        J = np.zeros((B, 2, 3))
+        J[:, 0, 0] = K[:, 0, 0] / camcoords[:, 2]
+        J[:, 1, 1] = K[:, 1, 1] / camcoords[:, 2]
+        J[:, 0, 2] = -J[:, 0, 0] * camcoords[:, 0] / camcoords[:, 2]
+        J[:, 1, 2] = -J[:, 1, 1] * camcoords[:, 1] / camcoords[:, 2]
+        J = np.einsum('bij,bjk->bik', J, R)  # Apply rotation
+        return J
+
+    def project3D2D(self, point3Dcoord, image_ids, sigma3D=None):
+        if len(image_ids) == 0:
+            return None
+        
+        intrinsic_matrices = np.stack([self.augmentor.intrinsics_camera[self.augmentor.colmap_images[image_id].camera_id] for image_id in image_ids])
+        rotation_matrices = np.stack([self.augmentor.rotations_image[image_id] for image_id in image_ids])
+        translation_vectors = np.stack([self.augmentor.translations_image[image_id].reshape(3,1) for image_id in image_ids])
+        point3D_world = point3Dcoord.reshape(3, 1)
+        point3D_camera = np.einsum('bij,jk->bik', rotation_matrices, point3D_world) + translation_vectors
+        point3D_pixel = np.einsum('bij,bjk->bik', intrinsic_matrices, point3D_camera)
+        point3D_uv, point3D_depth = point3D_pixel[:, :2, :] / point3D_pixel[:, 2:, :], point3D_pixel[:, 2:, :] # (B, 2, 1), (B, 1, 1)
+        J = self.computeJacobian(point3D_camera, intrinsic_matrices, rotation_matrices)
+        if sigma3D is not None:
+            cov3Dmatrix_proj = np.einsum('bij,jk,bkl->bil', J, sigma3D, J.transpose(0, 2, 1))
+        else:
+            cov3Dmatrix_proj = None
+        point3D_uv = np.clip(np.round(point3D_uv.reshape(-1, 2)), 0, intrinsic_matrices[:, :2, 2].reshape(-1, 2)*2-1).astype(int)
+        return {"point3D_uv": point3D_uv, "cov3Dmatrix_proj": cov3Dmatrix_proj, "sigma3D": sigma3D, "point3D_depth": point3D_depth}
+
+    def estimateCov3D(self, point3Dcoord, image_ids, patch_length=0.05):
+        # project 3D point to 2D for constructing 2D covariance matrix labels
+        proj = self.project3D2D(point3Dcoord, image_ids)
+        if proj is None:
+            return None
+        uvs = proj["point3D_uv"]
+        depths = proj["point3D_depth"].reshape(-1)
+        focal_lengths = np.asarray([self.augmentor.intrinsics_camera[self.augmentor.colmap_images[image_id].camera_id][0:2, 2] for image_id in image_ids])
+        focal_length_mean = np.mean(focal_lengths)
+        # Ensure focal_length_mean is a scalar
+        if hasattr(focal_length_mean, 'item'):
+            focal_length_mean = focal_length_mean.item()
+        assert np.isscalar(focal_length_mean), "focal_length_mean must be a scalar"
+        window_sizes = np.floor(focal_length_mean * patch_length / depths)
+        window_sizes = np.maximum(window_sizes, 3)
+        window_sizes = (window_sizes // 2) * 2 + 1
+        window_sizes = window_sizes.astype(int)
+        Ix_means = [cv2.GaussianBlur(self.Ixs[image_id], (int(window_size), int(window_size)), 0)[uvs[i][1], uvs[i][0]] for i, (image_id, window_size) in enumerate(zip(image_ids, window_sizes))]
+        Iy_means = [cv2.GaussianBlur(self.Iys[image_id], (int(window_size), int(window_size)), 0)[uvs[i][1], uvs[i][0]] for i, (image_id, window_size) in enumerate(zip(image_ids, window_sizes))]
+        structure_tensors = [np.asarray([[Ix**2, Ix*Iy], [Ix*Iy, Iy**2]]) for Ix, Iy in zip(Ix_means, Iy_means)]
+        eigdecs = [np.linalg.eigh(st.reshape(2,2)) for st in structure_tensors]
+        eigvals = [eigdec[0] for eigdec in eigdecs]
+        eigvecs = [eigdec[1] for eigdec in eigdecs]
+        adapatch_cov2Ds = []
+        for i in range(len(eigvals)):
+            grad_magnitude = np.linalg.norm(np.asarray([Ix_means[i], Iy_means[i]]))
+            alpha = 1 / (1 + np.exp(-grad_magnitude))
+
+            rel_eigvals = eigvals[i] + 1e-6
+            rel_scale = (np.min(rel_eigvals) / rel_eigvals)
+            rel_scale = np.clip(rel_scale, 0.1, 1)
+            max_scale = (window_sizes[i] / 2) ** 2
+            aniso_part = np.diag(max_scale * rel_scale)
+            iso_part = np.diag([max_scale, max_scale])
+            scale_matrix = alpha * aniso_part + (1 - alpha) * iso_part
+            eigvals_tmp, _ = np.linalg.eigh(scale_matrix)
+            k = max_scale / np.max(eigvals_tmp)
+            scale_matrix = scale_matrix * k
+            cov2D = eigvecs[i] @ scale_matrix @ eigvecs[i].T
+            adapatch_cov2Ds.append(cov2D)
+        adapatch_cov2Ds = np.asarray(adapatch_cov2Ds)
+
+        Sigma3D_est = self.solveCholeskyMinimizeCov2D3D(
+            point3Dcoord=point3Dcoord,
+            image_ids=image_ids,
+            cov2Dmatrix=adapatch_cov2Ds
+        )
+
+        eigval, eigvec = np.linalg.eigh(Sigma3D_est.reshape(3, 3))
+        proj_temp = self.project3D2D(point3Dcoord, image_ids, Sigma3D_est.reshape(3,3))
+        sfs = []
+        for i, cov2d_temp in enumerate(proj_temp["cov3Dmatrix_proj"]):
+            assert cov2d_temp is not None
+            eigval_temp, eigvec_temp = np.linalg.eigh(cov2d_temp)
+            target_size = window_sizes[i] / 2
+            sf = target_size / np.sqrt(eigval_temp[1])
+            sfs.append(sf)
+        scale_factor = np.mean(np.asarray(sfs))
+        Sigma3D_est = eigvec @ np.diag(eigval * scale_factor**2) @ eigvec.T
+        
+        return Sigma3D_est
+    
+    def rotation_to_quaternion(self, rotation_matrix):
+        assert rotation_matrix.shape == (3, 3), "Rotation matrix must be 3x3"
+        r = rotation_matrix
+        qw = torch.sqrt(torch.clamp(1 + r[0, 0] + r[1, 1] + r[2, 2], min=0)) / 2
+        qx = torch.sqrt(torch.clamp(1 + r[0, 0] - r[1, 1] - r[2, 2], min=0)) / 2
+        qy = torch.sqrt(torch.clamp(1 - r[0, 0] + r[1, 1] - r[2, 2], min=0)) / 2
+        qz = torch.sqrt(torch.clamp(1 - r[0, 0] - r[1, 1] + r[2, 2], min=0)) / 2
+        qx = torch.copysign(qx, r[2, 1] - r[1, 2])
+        qy = torch.copysign(qy, r[0, 2] - r[2, 0])
+        qz = torch.copysign(qz, r[1, 0] - r[0, 1])
+        return torch.tensor([qw, qx, qy, qz], dtype=torch.float32, device="cuda")
+
+    def checkBaseline(self, point3Dcoord, image_ids):
+        Rs = np.asarray([self.augmentor.rotations_image[image_id] for image_id in image_ids])
+        ts = np.asarray([self.augmentor.translations_image[image_id].reshape(3,1) for image_id in image_ids])
+        assert Rs.shape == (len(image_ids), 3, 3)
+        assert ts.shape == (len(image_ids), 3, 1)
+        camcenters = np.asarray([(-R.T @ t).reshape(3) for R, t in zip(Rs, ts)])
+        assert camcenters.shape == (len(image_ids), 3)
+        point3Dcoord = point3Dcoord.reshape(3)
+        # Compute all angles between the vector pairs from camera centers to the 3D point
+        vectors = camcenters - point3Dcoord
+        assert vectors.shape == (len(image_ids), 3)
+        norms = np.linalg.norm(vectors, axis=1)
+        assert norms.shape == (len(image_ids),)
+        vectors_normalized = vectors / norms[:, np.newaxis]
+        assert vectors_normalized.shape == (len(image_ids), 3)
+        angles = np.arccos(np.clip(np.dot(vectors_normalized, vectors_normalized.T), -1.0, 1.0))
+        assert angles.shape == (len(image_ids), len(image_ids))
+        # Check if the minimum angle is less than 10 degrees
+        max_angle = np.max(angles)  # Exclude zero
+        if max_angle < np.deg2rad(10):
+            return "narrow"
+        else:
+            return "wide"
+
+    def directApplicationCov3Ds(self, GaussianModel):
+        self.images = {image_id: cv2.cvtColor(cv2.imread(os.path.join(self.augmentor.image_dir, self.augmentor.colmap_images[image_id].name)), cv2.COLOR_BGR2GRAY)/255. for image_id in self.augmentor.image_keys}
+        self.Ixs = {image_id: cv2.Sobel(cv2.GaussianBlur(self.images[image_id], (5,5), 0), cv2.CV_64F, 1, 0, ksize=5) for image_id in self.augmentor.image_keys}
+        self.Iys = {image_id: cv2.Sobel(cv2.GaussianBlur(self.images[image_id], (5,5), 0), cv2.CV_64F, 0, 1, ksize=5) for image_id in self.augmentor.image_keys}
+        c = 0
+        Sigma3Ds = {}
+        for point3D_idx, (_, point3D) in tqdm(enumerate(self.augmentor.colmap_points3D.items()), desc="Estimating 3D Covariance Matrices"):
+            image_ids = [point3D.image_ids[i] for i in range(len(point3D.image_ids)) if point3D.image_ids[i] in self.augmentor.image_keys]
+            if len(image_ids) < 2:
+                continue
+            point3Dcoord = np.asarray(point3D.xyz, dtype=np.float32)
+            if self.checkBaseline(point3Dcoord, image_ids) == "narrow":
+                continue
+            Sigma3D_est = self.estimateCov3D(point3Dcoord, image_ids)
+            if Sigma3D_est is not None:
+                Sigma3Ds[point3D_idx] = Sigma3D_est
+                c += 1
+        # Decompose each 3D covariance matrix into rotation (R) and log-scale (S) matrices such that Sigma = R @ exp(S) @ exp(S) @ R.T
+        self.cov3d_decomposed = {}
+        for idx, Sigma in Sigma3Ds.items():
+            # Eigen-decomposition: Sigma = V @ diag(eigvals) @ V.T
+            eigvals, eigvecs = np.linalg.eigh(Sigma)
+            # Ensure positive eigenvalues for log
+            eigvals = np.clip(eigvals, 1e-8, None)
+            # S is diagonal matrix of log(sqrt(eigvals))
+            S = np.log(np.sqrt(eigvals))
+            R = eigvecs
+            self.cov3d_decomposed[idx] = {"R": R, "S": S}
+        with torch.no_grad():
+            for point3D_idx, cov3d in self.cov3d_decomposed.items():
+                R = torch.tensor(cov3d["R"], dtype=torch.float32, device="cuda")
+                S = torch.tensor(cov3d["S"], dtype=torch.float32, device="cuda")
+                GaussianModel._rotation[point3D_idx] = torch.tensor(self.rotation_to_quaternion(R), dtype=torch.float32, device="cuda")
+                GaussianModel._scaling[point3D_idx] = torch.tensor(S, dtype=torch.float32, device="cuda")
+
+        print(f"Estimated {c} 3D covariance matrices from COLMAP points.")
+            
+
+    #################################################
+
+
+    
+
+
 
     def create_p3d_image_id_matrix(self):
         from points3Dvisualization import Colmap3DPoint
@@ -512,7 +917,11 @@ class QuadtreeInitDataset(Dataset):
         self.corresponding_cov_matrix = []
         self.test_only_3d_indices = []
         self.colmap3Dpoints = {}
-        
+        self.images = {image_id: cv2.cvtColor(cv2.imread(os.path.join(self.augmentor.image_dir, self.augmentor.colmap_images[image_id].name)), cv2.COLOR_BGR2GRAY)/255. for image_id in self.augmentor.image_keys}
+        self.Ixs = {image_id: cv2.Sobel(cv2.GaussianBlur(self.images[image_id], (5,5), 0), cv2.CV_64F, 1, 0, ksize=5) for image_id in self.augmentor.image_keys}
+        self.Iys = {image_id: cv2.Sobel(cv2.GaussianBlur(self.images[image_id], (5,5), 0), cv2.CV_64F, 0, 1, ksize=5) for image_id in self.augmentor.image_keys}
+
+
         for point3D_idx, (_, point3D) in tqdm(enumerate(self.augmentor.colmap_points3D.items()), desc="Creating Point-Image Matrix"):
             imagepath = self.augmentor.image_dir
             imageids = []
@@ -523,33 +932,46 @@ class QuadtreeInitDataset(Dataset):
             intrinsic_matrices = self.augmentor.intrinsics_camera
             rotation_matrices = self.augmentor.rotations_image
             translation_vectors = self.augmentor.translations_image
-
+            depths = []
             for i, image_id in enumerate(point3D.image_ids):
                 if image_id not in self.augmentor.image_keys:
-                    self.test_only_3d_indices.append(point3D_idx)
+                    continue
+                depth = self.compute_depth(point3Dcoord, image_id)
+                depths.append(depth)
+
+            scales = self.compute_scales(depths)
+            idx = 0
+            for i, image_id in enumerate(point3D.image_ids):
+                if image_id not in self.augmentor.image_keys:
+                    # self.test_only_3d_indices.append(point3D_idx)
                     continue
                 
                 point2D_idx = point3D.point2D_idxs[i]
-                point2D_coordx, point2D_coordy = self.augmentor.colmap_images[image_id].xys[point2D_idx]
+                # point2D_coordx, point2D_coordy = self.augmentor.colmap_images[image_id].xys[point2D_idx]
+                point2D_coordx, point2D_coordy = self.computeWorldToPix(point3Dcoord, image_id)
                 
-                scaled_x = np.clip(round(point2D_coordx / self.image_scale), 0, self.augmentor.roots[image_id].width - 1)
-                scaled_y = np.clip(round(point2D_coordy / self.image_scale), 0, self.augmentor.roots[image_id].height - 1)
+                # Modified version has intrinsic matrices that are already scaled, so there is no need for scaling.
+                # scaled_x = np.clip(round(point2D_coordx / self.image_scale), 0, self.augmentor.roots[image_id].width - 1)
+                # scaled_y = np.clip(round(point2D_coordy / self.image_scale), 0, self.augmentor.roots[image_id].height - 1)
                 
-                corresponding_leaf_node = self.augmentor.find_corresponding_leaf_node(image_id, [scaled_x, scaled_y])
-                if corresponding_leaf_node is None:
-                    continue
-                    
-                cov_matrix = self.gradient_to_covariance(image_id, [scaled_x, scaled_y], corresponding_leaf_node.width)
+                # corresponding_leaf_node = self.augmentor.find_corresponding_leaf_node(image_id, [scaled_x, scaled_y])
+                # if corresponding_leaf_node is None:
+                #     continue
+
+                scaled_x = int(np.clip(np.round(point2D_coordx), 0, self.augmentor.roots[image_id].width - 1))
+                scaled_y = int(np.clip(np.round(point2D_coordy), 0, self.augmentor.roots[image_id].height - 1))
+                cov_matrix = self.gradient_to_covariance(image_id, [scaled_x, scaled_y], None)
                 
                 if np.isnan(cov_matrix).any() or np.isinf(cov_matrix).any():
                     continue
                     
                 self.p3d_image_id_matrix.append([point3D_idx, image_id, None, None])
-                self.corresponding_cov_matrix.append(cov_matrix * self.scale)
+                self.corresponding_cov_matrix.append(cov_matrix * scales[idx])
                 imageids.append(image_id)
                 imagenames.append(self.augmentor.colmap_images[image_id].name)
                 point2Dcoords.append([scaled_x, scaled_y])
-                cov2Dmatrices.append(cov_matrix * self.scale)
+                cov2Dmatrices.append(cov_matrix * scales[idx])
+                idx += 1
             
             self.colmap3Dpoints[point3D_idx] = Colmap3DPoint(
                 imageids=imageids,
@@ -563,6 +985,8 @@ class QuadtreeInitDataset(Dataset):
                 rotation_matrices=rotation_matrices,
                 translation_vectors=translation_vectors,
             )
+
+
 
     
     def augmentation_mode(self):
