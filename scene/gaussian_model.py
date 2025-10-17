@@ -203,8 +203,8 @@ class GaussianModel:
         features[:, 3:, 1:] = 0.0
 
         print("Number of augmented points at initialisation : ", augmented_point_cloud.shape[0])
-        dist2 = torch.clamp_min(distCUDA2(augmented_point_cloud), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        dist2 = torch.clamp_min(distCUDA2(torch.concat((self._xyz, augmented_point_cloud), dim=0)), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[self._xyz.detach().clone().shape[0]:][..., None].repeat(1, 3)
         rots = torch.zeros((augmented_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 

@@ -9,7 +9,9 @@ unset GTK_IM_MODULE
 unset QT_IM_MODULE
 unset XMODIFIERS
 
-for scene in /home/cvnar/disk4tb/tandt/*; do
-    scene_name=$(basename $scene)
-    python convert.py -s /home/cvnar/disk4tb/tandt/$scene_name
-done
+# for scene in /home/cvnar/disk4tb/tandt/*; do
+#     scene_name=$(basename $scene)
+#     python convert.py -s /home/cvnar/disk4tb/tandt/$scene_name
+# done
+
+xvfb-run -a python convert.py -s /mnt/disk2/360_7/bicycle --camera PINHOLE
