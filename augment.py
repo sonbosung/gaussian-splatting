@@ -3,6 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import cv2
 import os
+import shutil
 
 from utils.colmap_utils import *
 from utils.bundle_utils import cluster_cameras

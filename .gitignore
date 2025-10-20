@@ -8,9 +8,10 @@ tensorboard_3d
 screenshots
 *.ipynb
 *.csv
-*.png
 experiments
 .gitsecret/keys/random_seed
 !*.secret
 *.sh
 *.zip
+covis_vis
+covis
